@@ -1,7 +1,5 @@
 # api/cron.py
 from http import HTTPStatus
-from zoneinfo import ZoneInfo
-from datetime import datetime, timezone
 import os
 import json
 import hashlib
@@ -26,9 +24,6 @@ RSS_FEEDS = json.loads(os.environ.get(
     "RSS_FEEDS",
     '["https://techcrunch.com/feed/", "https://www.crn.com/news/data-center/rss.xml"]'
 ))
-
-# DST-safe schedule: function can be called hourly, but only posts at these local hours
-TARGET_HOURS_LONDON = [8, 17]  # 08:00 and 17:00 Europe/London
 
 def sha1(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
@@ -82,7 +77,10 @@ def score_article(item) -> int:
 
     high = [
         "funding", "raises", "acquisition", "acqui", "outage", "breach",
-        "open source", "partnership", "launch", "announced", "milestone"
+        "open source", "partnership", "launch", "announced", "milestone",
+        # extra infra-ish signals (optional but useful)
+        "data center", "datacentre", "colocation", "colo", "hyperscale",
+        "megawatt", "power", "grid", "cooling", "liquid cooling"
     ]
     infra = ["h100", "h200", "mi300", "gpu", "accelerator", "nvidia", "amd", "intel"]
 
@@ -133,15 +131,8 @@ def handler(request):
     if missing:
         return (f"Missing env vars: {', '.join(missing)}", HTTPStatus.INTERNAL_SERVER_ERROR)
 
-    now_utc = datetime.now(timezone.utc)
-    now_london = now_utc.astimezone(ZoneInfo("Europe/London"))
-    logger.info("Now London: %s", now_london.isoformat())
-
-    # DST-safe: only post at 08:00 or 17:00 local time
-    if now_london.hour not in TARGET_HOURS_LONDON:
-        return ("OK - not a posting hour", HTTPStatus.OK)
-
     items = fetch_feeds(RSS_FEEDS)
+
     scored = []
     for it in items:
         if not it.get("url"):
