@@ -1,0 +1,8 @@
+{
+  "name": "news-bot",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "rss-parser": "^3.13.0"
+  }
+}
