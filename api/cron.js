@@ -9,25 +9,31 @@ const UPSTASH_REDIS_REST = process.env.UPSTASH_REDIS_REST;
 const UPSTASH_REDIS_TOKEN = process.env.UPSTASH_REDIS_TOKEN;
 
 const MIN_SCORE = Number(process.env.MIN_SCORE ?? "3");
-const POST_MAX = Number(process.env.POST_MAX_PER_RUN ?? "10"); // bump a bit for a weekly digest
+// bump default so a weekly run can post more than 3 stories if needed
+const POST_MAX = Number(process.env.POST_MAX_PER_RUN ?? "10");
 
+// Updated sources: TechCrunch + The Tech Capital + DatacenterDynamics
 const RSS_FEEDS = JSON.parse(
   process.env.RSS_FEEDS ??
-    '["https://techcrunch.com/feed/","https://www.crn.com/news/data-center/rss.xml"]'
+    JSON.stringify([
+      "https://techcrunch.com/feed/",
+      // Tech Capital (WordPress-style feed; override via RSS_FEEDS env if you prefer a more specific category feed)
+      "https://thetechcapital.com/feed/",
+      // DatacenterDynamics RSS (official)
+      "https://www.datacenterdynamics.com/rss/"
+    ])
 );
 
-// ---- Helpers ----
+// --- helpers ---
 
 function sha1Hex(input) {
   // Minimal SHA-1 using WebCrypto (available in Node 18+ on Vercel)
   const enc = new TextEncoder();
-  return crypto.subtle
-    .digest("SHA-1", enc.encode(input))
-    .then((buf) =>
-      Array.from(new Uint8Array(buf))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("")
-    );
+  return crypto.subtle.digest("SHA-1", enc.encode(input)).then((buf) =>
+    Array.from(new Uint8Array(buf))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+  );
 }
 
 async function upstashGet(key) {
@@ -83,78 +89,29 @@ function scoreArticle({ title = "", contentSnippet = "" }) {
   return s;
 }
 
-// Turn a summary string into up to 2 bullet lines
-function makeSummaryBullets(summary, maxBullets = 2) {
-  if (!summary) return [];
-
-  const cleaned = summary.replace(/\s+/g, " ").trim();
-  if (!cleaned) return [];
-
-  // Naive sentence split
-  const sentences = cleaned
-    .split(/(?<=[.?!])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (sentences.length >= maxBullets) {
-    return sentences.slice(0, maxBullets);
-  }
-
-  // If only one long sentence, split roughly in half
-  if (sentences.length === 1 && cleaned.length > 180) {
-    const mid = Math.floor(cleaned.length / 2);
-    const splitIdx = cleaned.indexOf(" ", mid);
-    if (splitIdx > -1) {
-      return [
-        cleaned.slice(0, splitIdx).trim(),
-        cleaned.slice(splitIdx).trim(),
-      ];
-    }
-  }
-
-  return sentences;
-}
-
-// Post *one* digest message for all articles
-async function postDigestToSlack(items) {
-  if (!items.length) return;
-
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const headerText = `*Weekly Infra & AI News Digest – ${today}*`;
-
+async function postToSlack({ title, url, summary, source, score }) {
   const blocks = [
     {
       type: "section",
-      text: { type: "mrkdwn", text: headerText },
+      text: { type: "mrkdwn", text: `*${title.slice(0, 300)}*` },
     },
-    { type: "divider" },
-  ];
-
-  for (const it of items) {
-    const bullets = makeSummaryBullets(it.summary, 2);
-
-    // Bullet header + sub-bullets
-    const lines = [
-      `• *${it.title.slice(0, 300)}*`,
-      ...bullets.map((b) => `   • ${b}`),
-      `   • <${it.url}|Read article> • Source: ${it.source} • Score: ${it.score}`,
-    ].join("\n");
-
-    blocks.push({
+    {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: lines,
+        text: `${(summary ?? "").slice(0, 700)}\n\n<${url}|Read article>`,
       },
-    });
-
-    blocks.push({ type: "divider" });
-  }
-
-  // Fallback text for notifications / when blocks aren't rendered
-  const fallbackText = items
-    .map((it) => `• ${it.title} - ${it.url}`)
-    .join("\n");
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `Source: ${source} • Score: ${score}`,
+        },
+      ],
+    },
+  ];
 
   const r = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
@@ -164,7 +121,7 @@ async function postDigestToSlack(items) {
     },
     body: JSON.stringify({
       channel: SLACK_CHANNEL_ID,
-      text: fallbackText,
+      text: `${title} - ${url}`,
       blocks,
     }),
   });
@@ -208,11 +165,11 @@ export default async function handler(req, res) {
         });
       }
     } catch (e) {
-      // ignore a failing feed and continue
+      // keep going if one feed fails
     }
   }
 
-  // Score, filter, and sort
+  // Score + filter
   const scored = items
     .map((it) => ({
       ...it,
@@ -221,28 +178,27 @@ export default async function handler(req, res) {
     .filter((it) => it.score >= MIN_SCORE)
     .sort((a, b) => b.score - a.score);
 
-  // Collect new, unseen items up to POST_MAX
-  const fresh = [];
+  let posted = 0;
+
+  // Post each new article as its own Slack message
   for (const it of scored) {
     const key = await sha1Hex(it.url);
     const seen = await upstashGet(key);
     if (seen) continue;
 
-    fresh.push({ ...it, _redisKey: key });
-    if (fresh.length >= POST_MAX) break;
+    await postToSlack({
+      title: it.title,
+      url: it.url,
+      summary: it.summary,
+      source: it.source,
+      score: it.score,
+    });
+
+    // mark as seen for 7 days (weekly cadence)
+    await upstashSetEx(key, "1", 7 * 86400);
+    posted += 1;
+    if (posted >= POST_MAX) break;
   }
 
-  if (!fresh.length) {
-    return res.status(200).send("OK - no new items");
-  }
-
-  // Post single digest
-  await postDigestToSlack(fresh);
-
-  // Mark all as seen for 7 days
-  await Promise.all(
-    fresh.map((it) => upstashSetEx(it._redisKey, "1", 7 * 86400))
-  );
-
-  return res.status(200).send(`OK - posted digest with ${fresh.length} items`);
+  return res.status(200).send(`OK - posted ${posted}`);
 }
