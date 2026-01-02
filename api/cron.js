@@ -17,8 +17,7 @@ const RSS_FEEDS = JSON.parse(
   process.env.RSS_FEEDS ??
     JSON.stringify([
       "https://techcrunch.com/feed/",
-      // Tech Capital (WordPress-style feed; override via RSS_FEEDS env if you prefer a more specific category feed)
-      "https://thetechcapital.com/feed/",
+      "https://www.datacenterknowledge.com/rss.xml?utm_source=chatgpt.com",
       // DatacenterDynamics RSS (official)
       "https://www.datacenterdynamics.com/rss/"
     ])
@@ -81,7 +80,7 @@ function scoreArticle({ title = "", contentSnippet = "" }) {
     "cooling",
     "liquid cooling",
   ];
-  const infra = ["h100", "h200", "mi300", "gpu", "accelerator", "nvidia", "amd", "intel"];
+  const infra = ["h100", "h200", "mi300", "gpu", "accelerator", "nvidia", "amd", "intel", "groq", "google", "gb300", "gb200", "rubin", "alphabet", "softbank", "oracle", "aws", "meta"];
 
   for (const h of high) if (txt.includes(h)) s += 3;
   for (const g of infra) if (txt.includes(g)) s += 2;
